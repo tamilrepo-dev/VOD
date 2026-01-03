@@ -18,112 +18,91 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Fetch & Generate Tamil Movies M3U
+      - name: Fetch Tamil Movies from webhop.live
         env:
           XTREAM_USER: "8zpo3GsVY7"
           XTREAM_PASS: "beneficial2concern"
-          XTREAM_HOSTS: |
-            http://webhop.live
-            http://livetvbox.live
-            http://starshare.st
-            http://starshare.org
-            http://starhub.pro
-            http://starshare.cx
+          XTREAM_HOST: "http://webhop.live"
         run: |
-          readarray -t HOSTS <<< "$XTREAM_HOSTS"
+          HOST="$XTREAM_HOST"
           OUTPUT="tamil_movies.m3u"
-          FOUND=0
+          echo "📡 Using single host: $HOST"
 
-          for HOST in "${HOSTS[@]}"; do
-            HOST=$(echo "$HOST" | xargs)
-            [[ -z "$HOST" ]] && continue
+          # Fetch categories
+          CATEGORIES_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories"
+          CATEGORIES=$(curl -s --max-time 20 "$CATEGORIES_URL")
 
-            echo "📡 Trying host: $HOST"
-
-            # Fetch categories
-            CATEGORIES_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories"
-            CATEGORIES=$(curl -s --max-time 20 --retry 2 "$CATEGORIES_URL")
-
-            # Validate categories is JSON array
-            if ! echo "$CATEGORIES" | jq 'type == "array"' >/dev/null 2>&1; then
-              echo "❌ Invalid categories JSON from $HOST"
-              continue
-            fi
-
-            # Fetch VOD list
-            VOD_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams"
-            VOD_LIST=$(curl -s --max-time 30 --retry 2 "$VOD_URL")
-
-            if ! echo "$VOD_LIST" | jq 'type == "array"' >/dev/null 2>&1; then
-              echo "❌ Invalid VOD list JSON from $HOST"
-              continue
-            fi
-
-            # Log Tamil category names
-            TAMIL_NAMES=$(echo "$CATEGORIES" | jq -r '
-              .[] |
-              select(.category_name | ascii_downcase | contains("tamil")) |
-              .category_name
-            ' | grep -v '^$')
-            COUNT_NAMES=$(echo "$TAMIL_NAMES" | wc -l)
-            echo "🎬 Found $COUNT_NAMES Tamil categories: $(echo "$TAMIL_NAMES" | paste -sd ', ' -)"
-
-            # Write M3U header
-            {
-              echo "#EXTM3U"
-              echo "# Auto-updated: $(date -u)"
-              echo "# Source: $HOST"
-              echo ""
-            } > "$OUTPUT"
-
-            # ✅ SAFE jq: no manual escaping, no broken pipes
-            echo "$VOD_LIST" | jq -r --argjson cats "$CATEGORIES" '
-              # Extract Tamil category IDs
-              ($cats | map(select(.category_name | ascii_downcase | contains("tamil"))) | map(.category_id)) as $tids |
-              # Process each VOD
-              .[] |
-              select(.category_id as $id | $tids | index($id)) |
-              # Safe fallbacks & escaping
-              (.name // "Unknown") as $name |
-              (.stream_icon // "") as $logo |
-              (.category_name // "Tamil") as $group |
-              (.stream_url // null) as $url |
-              # Skip if no stream URL
-              select($url) |
-              # Build EXTINF line: escape quotes inside JSON strings
-              "#EXTINF:-1 tvg-logo=\"" + ($logo | @json | .[1:-1]) + 
-              "\" group-title=\"" + ($group | @json | .[1:-1]) + 
-              "\", " + ($name | @json | .[1:-1]) +
-              "\n" + $url
-            ' >> "$OUTPUT"
-
-            # Final cleanup: remove malformed entries
-            sed -i '/^$/d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
-
-            COUNT=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
-            echo "✅ Success! $COUNT Tamil movies from $HOST"
-
-            if [ "$COUNT" -gt 0 ]; then
-              FOUND=1
-              break
-            else
-              echo "⚠️ No valid streams — trying next host…"
-            fi
-          done
-
-          if [ "$FOUND" -eq 0 ]; then
-            echo "💥 All hosts failed or returned 0 valid Tamil movies."
+          if ! echo "$CATEGORIES" | jq 'type == "array"' >/dev/null 2>&1; then
+            echo "❌ Invalid categories JSON"
             exit 1
           fi
 
-      - name: Commit and push (if changed)
+          # Fetch VOD list
+          VOD_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams"
+          VOD_LIST=$(curl -s --max-time 30 "$VOD_URL")
+
+          if ! echo "$VOD_LIST" | jq 'type == "array"' >/dev/null 2>&1; then
+            echo "❌ Invalid VOD list JSON"
+            exit 1
+          fi
+
+          # Log Tamil categories & IDs (debug)
+          echo "$CATEGORIES" | jq -r '
+            .[] |
+            select(.category_name | ascii_downcase | contains("tamil")) |
+            "📌 \(.category_name) → ID: \(.category_id)"
+          ' | while IFS= read -r line; do echo "$line"; done
+
+          # Build M3U header
+          {
+            echo "#EXTM3U"
+            echo "# Auto-updated: $(date -u)"
+            echo "# Source: $HOST"
+            echo ""
+          } > "$OUTPUT"
+
+          # ✅ SMART MATCH: handle numeric/string/category_ids
+          echo "$VOD_LIST" | jq -r --argjson cats "$CATEGORIES" '
+            # Get set of Tamil category IDs (as strings — safest for comparison)
+            ($cats | map(select(.category_name | ascii_downcase | contains("tamil"))) | map(.category_id | tostring)) as $tamil_ids |
+
+            .[] |
+            # Try: category_id (single), category_ids (array), or cat_id
+            (.category_id // .cat_id // (if .category_ids and (.category_ids | length > 0) then .category_ids[0] else null end)) as $cid |
+            select($cid) |
+            ($cid | tostring) as $cid_str |
+            select($tamil_ids | index($cid_str)) |
+            # Safe fields
+            (.name // "Unknown") as $name |
+            (.stream_icon // "") as $logo |
+            (.category_name // "Tamil") as $group |
+            (.stream_url // null) as $url |
+            select($url) |
+            "#EXTINF:-1 tvg-logo=\"" + ($logo | @json | .[1:-1]) +
+            "\" group-title=\"" + ($group | @json | .[1:-1]) +
+            "\", " + ($name | @json | .[1:-1]) +
+            "\n" + $url
+          ' >> "$OUTPUT"
+
+          # Cleanup & count
+          sed -i '/^$/d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
+          COUNT=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
+
+          echo "✅ Final count: $COUNT Tamil movies"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "🛑 No movies found — check category_id format or server status."
+            exit 1
+          fi
+
+      - name: Commit and push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git add tamil_movies.m3u && ! git diff --staged --quiet; then
-            git commit -m "🤖 Auto-update: Tamil Movies M3U ($(date -u))"
+            git commit -m "🤖 Auto-update: $COUNT Tamil movies ($(date -u))"
             git push
           else
-            echo "⏭️ No changes — skipping commit."
+            echo "⏭️ No changes"
           fi
