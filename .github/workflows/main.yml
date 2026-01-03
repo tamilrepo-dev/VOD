@@ -1,10 +1,12 @@
-name: Fetch Tamil Movies (Construct URLs)
+name: Fetch Tamil VOD (Every 10 mins)
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'   # Every 10 minutes
+  workflow_dispatch:         # Manual run
 
 jobs:
-  update-m3u:
+  update-vod:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -16,7 +18,7 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Build Tamil Movies M3U
+      - name: Build vod.m3u
         env:
           XTREAM_USER: "8zpo3GsVY7"
           XTREAM_PASS: "beneficial2concern"
@@ -25,7 +27,7 @@ jobs:
           HOST="$XTREAM_HOST"
           USER="$XTREAM_USER"
           PASS="$XTREAM_PASS"
-          OUTPUT="tamil_movies.m3u"
+          OUTPUT="vod.m3u"   # ✅ RENAMED HERE
 
           {
             echo "#EXTM3U"
@@ -34,8 +36,9 @@ jobs:
             echo ""
           } > "$OUTPUT"
 
+          # Fetch categories
           CATEGORIES=$(curl -s "${HOST}/player_api.php?username=${USER}&password=${PASS}&action=get_vod_categories")
-          echo "$CATEGORIES" | jq empty >/dev/null || { echo "❌ Categories failed"; exit 1; }
+          echo "$CATEGORIES" | jq empty >/dev/null || { echo "❌ Categories API failed"; exit 1; }
 
           # Get Tamil categories
           TAMIL_CATS=$(echo "$CATEGORIES" | jq -c '
@@ -58,7 +61,6 @@ jobs:
             echo "  → $COUNT movies"
 
             if [ "$COUNT" -gt 0 ]; then
-              # Extract name, icon, id, ext — then construct URL in Bash
               echo "$VODS" | jq -r --arg group "$cname" --arg host "$HOST" --arg user "$USER" --arg pass "$PASS" '
                 .[] |
                 select(.stream_id) |
@@ -75,28 +77,28 @@ jobs:
             fi
           done
 
-          echo "✅ Total entries attempted: $TOTAL"
+          echo "✅ Total entries: $TOTAL"
 
-          # Cleanup & count real URLs
+          # Cleanup
           sed -i '/^$/d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
           FINAL=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
 
-          echo "📤 Final working streams: $FINAL"
+          echo "📤 Final streams in vod.m3u: $FINAL"
 
           if [ "$FINAL" -eq 0 ]; then
-            echo "🛑 M3U is empty. Sample of what was generated:"
-            head -n 6 "$OUTPUT" || echo "(empty)"
+            echo "🛑 vod.m3u is empty — check logs above."
+            head -n 10 "$OUTPUT" || echo "(file empty)"
             exit 1
           fi
 
-      - name: Commit
+      - name: Commit vod.m3u
         run: |
-          git add tamil_movies.m3u
-          if ! git diff --staged --quiet; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "🤖 $FINAL Tamil movies ($(date -u))"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git add vod.m3u && ! git diff --staged --quiet; then
+            git commit -m "🤖 $FINAL Tamil VODs ($(date -u))"
             git push
           else
-            echo "⏭️ No changes"
+            echo "⏭️ No changes to vod.m3u"
           fi
