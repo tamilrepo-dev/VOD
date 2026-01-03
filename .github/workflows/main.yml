@@ -1,9 +1,9 @@
-name: Fetch Tamil Movies M3U (Every 10 mins)
+name: Fetch Tamil Movies (Per-Category)
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'
   workflow_dispatch:
+  # schedule:
+  #   - cron: '*/10 * * * *'
 
 jobs:
   update-m3u:
@@ -12,13 +12,13 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Fetch Tamil Movies from webhop.live
+      - name: Fetch Tamil Movies by Category
         env:
           XTREAM_USER: "8zpo3GsVY7"
           XTREAM_PASS: "beneficial2concern"
@@ -26,83 +26,69 @@ jobs:
         run: |
           HOST="$XTREAM_HOST"
           OUTPUT="tamil_movies.m3u"
-          echo "📡 Using single host: $HOST"
+          echo "#EXTM3U" > "$OUTPUT"
+          echo "# Auto-updated: $(date -u)" >> "$OUTPUT"
+          echo "# Source: $HOST" >> "$OUTPUT"
+          echo "" >> "$OUTPUT"
 
-          # Fetch categories
-          CATEGORIES_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories"
-          CATEGORIES=$(curl -s --max-time 20 "$CATEGORIES_URL")
+          TOTAL=0
 
-          if ! echo "$CATEGORIES" | jq 'type == "array"' >/dev/null 2>&1; then
-            echo "❌ Invalid categories JSON"
+          # Fetch categories once
+          CATEGORIES=$(curl -s "${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories")
+          if ! echo "$CATEGORIES" | jq 'type == "array"' >/dev/null; then
+            echo "❌ Categories failed"
             exit 1
           fi
 
-          # Fetch VOD list
-          VOD_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams"
-          VOD_LIST=$(curl -s --max-time 30 "$VOD_URL")
-
-          if ! echo "$VOD_LIST" | jq 'type == "array"' >/dev/null 2>&1; then
-            echo "❌ Invalid VOD list JSON"
-            exit 1
-          fi
-
-          # Log Tamil categories & IDs (debug)
+          # Get Tamil IDs & names
           echo "$CATEGORIES" | jq -r '
             .[] |
             select(.category_name | ascii_downcase | contains("tamil")) |
-            "📌 \(.category_name) → ID: \(.category_id)"
-          ' | while IFS= read -r line; do echo "$line"; done
+            "\(.category_id):\(.category_name)"
+          ' | while IFS=':' read -r cid cname; do
+            echo "🎬 Fetching category: $cname (ID: $cid)"
+            
+            # Fetch VODs for this category only
+            VODS=$(curl -s "${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams&category_id=${cid}")
+            
+            COUNT=$(echo "$VODS" | jq 'length // 0')
+            echo "  → $COUNT movies"
 
-          # Build M3U header
-          {
-            echo "#EXTM3U"
-            echo "# Auto-updated: $(date -u)"
-            echo "# Source: $HOST"
-            echo ""
-          } > "$OUTPUT"
+            # Append to M3U
+            echo "$VODS" | jq -r --arg group "$cname" '
+              .[] |
+              select(.stream_url) |
+              "#EXTINF:-1 tvg-logo=\"" + (.stream_icon // "" | @json | .[1:-1]) +
+              "\" group-title=\"" + ($group | @json | .[1:-1]) +
+              "\", " + (.name // "Unknown" | @json | .[1:-1]) +
+              "\n" + .stream_url
+            ' >> "$OUTPUT"
 
-          # ✅ SMART MATCH: handle numeric/string/category_ids
-          echo "$VOD_LIST" | jq -r --argjson cats "$CATEGORIES" '
-            # Get set of Tamil category IDs (as strings — safest for comparison)
-            ($cats | map(select(.category_name | ascii_downcase | contains("tamil"))) | map(.category_id | tostring)) as $tamil_ids |
+            TOTAL=$((TOTAL + COUNT))
+          done
 
-            .[] |
-            # Try: category_id (single), category_ids (array), or cat_id
-            (.category_id // .cat_id // (if .category_ids and (.category_ids | length > 0) then .category_ids[0] else null end)) as $cid |
-            select($cid) |
-            ($cid | tostring) as $cid_str |
-            select($tamil_ids | index($cid_str)) |
-            # Safe fields
-            (.name // "Unknown") as $name |
-            (.stream_icon // "") as $logo |
-            (.category_name // "Tamil") as $group |
-            (.stream_url // null) as $url |
-            select($url) |
-            "#EXTINF:-1 tvg-logo=\"" + ($logo | @json | .[1:-1]) +
-            "\" group-title=\"" + ($group | @json | .[1:-1]) +
-            "\", " + ($name | @json | .[1:-1]) +
-            "\n" + $url
-          ' >> "$OUTPUT"
+          echo "✅ Total Tamil movies: $TOTAL"
 
-          # Cleanup & count
-          sed -i '/^$/d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
-          COUNT=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
-
-          echo "✅ Final count: $COUNT Tamil movies"
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "🛑 No movies found — check category_id format or server status."
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "🛑 No movies found"
             exit 1
           fi
 
-      - name: Commit and push
+      - name: Cleanup & Push
         run: |
+          # Remove duplicates (by URL)
+          awk '!seen[$0]++' tamil_movies.m3u > tmp && mv tmp tamil_movies.m3u
+
+          # Count final
+          COUNT=$(grep -c '^http' tamil_movies.m3u || echo 0)
+          echo "📤 Final unique movies: $COUNT"
+
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git add tamil_movies.m3u && ! git diff --staged --quiet; then
-            git commit -m "🤖 Auto-update: $COUNT Tamil movies ($(date -u))"
-            git push
-          else
+          if ! git add tamil_movies.m3u || git diff --staged --quiet; then
             echo "⏭️ No changes"
+          else
+            git commit -m "🤖 $COUNT Tamil movies ($(date -u))"
+            git push
           fi
