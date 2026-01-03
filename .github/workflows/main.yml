@@ -1,9 +1,7 @@
-name: Fetch Tamil Movies (Per-Category, Fixed)
+name: Fetch Tamil Movies (Construct URLs)
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '*/10 * * * *'
 
 jobs:
   update-m3u:
@@ -18,13 +16,15 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Fetch & Build M3U
+      - name: Build Tamil Movies M3U
         env:
           XTREAM_USER: "8zpo3GsVY7"
           XTREAM_PASS: "beneficial2concern"
           XTREAM_HOST: "http://webhop.live"
         run: |
           HOST="$XTREAM_HOST"
+          USER="$XTREAM_USER"
+          PASS="$XTREAM_PASS"
           OUTPUT="tamil_movies.m3u"
 
           {
@@ -34,14 +34,10 @@ jobs:
             echo ""
           } > "$OUTPUT"
 
-          # Fetch categories
-          CATEGORIES=$(curl -s "${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories")
-          if ! echo "$CATEGORIES" | jq 'type == "array"' >/dev/null; then
-            echo "❌ Categories API failed"
-            exit 1
-          fi
+          CATEGORIES=$(curl -s "${HOST}/player_api.php?username=${USER}&password=${PASS}&action=get_vod_categories")
+          echo "$CATEGORIES" | jq empty >/dev/null || { echo "❌ Categories failed"; exit 1; }
 
-          # Get Tamil categories as JSON array: [{"id":"602","name":"TAMIL (2025)"},...]
+          # Get Tamil categories
           TAMIL_CATS=$(echo "$CATEGORIES" | jq -c '
             [.[] | 
               select(.category_name | ascii_downcase | contains("tamil")) |
@@ -51,58 +47,55 @@ jobs:
 
           TOTAL=0
 
-          # Iterate in Bash (no subshell!)
           for row in $(echo "$TAMIL_CATS" | jq -r '.[] | @base64'); do
             _jq() { echo "$row" | base64 -d | jq -r "$1"; }
             cid=$(_jq '.id')
             cname=$(_jq '.name')
-
             echo "🎬 $cname (ID: $cid)"
-            VODS=$(curl -s "${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams&category_id=${cid}")
 
-            # Count and append
+            VODS=$(curl -s "${HOST}/player_api.php?username=${USER}&password=${PASS}&action=get_vod_streams&category_id=${cid}")
             COUNT=$(echo "$VODS" | jq 'length // 0')
             echo "  → $COUNT movies"
 
             if [ "$COUNT" -gt 0 ]; then
-              echo "$VODS" | jq -r --arg group "$cname" '
+              # Extract name, icon, id, ext — then construct URL in Bash
+              echo "$VODS" | jq -r --arg group "$cname" --arg host "$HOST" --arg user "$USER" --arg pass "$PASS" '
                 .[] |
-                select(.stream_url) |
-                "#EXTINF:-1 tvg-logo=\"" + (.stream_icon // "" | @json | .[1:-1]) +
+                select(.stream_id) |
+                (.name // "Unknown") as $name |
+                (.stream_icon // "") as $logo |
+                (.container_extension // "mp4") as $ext |
+                (.stream_id | tostring) as $id |
+                "#EXTINF:-1 tvg-logo=\"" + ($logo | @json | .[1:-1]) +
                 "\" group-title=\"" + ($group | @json | .[1:-1]) +
-                "\", " + (.name // "Unknown" | @json | .[1:-1]) +
-                "\n" + .stream_url
+                "\", " + ($name | @json | .[1:-1]) +
+                "\n" + $host + "/movie/" + $user + "/" + $pass + "/" + $id + "." + $ext
               ' >> "$OUTPUT"
               TOTAL=$((TOTAL + COUNT))
             fi
           done
 
-          echo "✅ Total fetched: $TOTAL movies"
+          echo "✅ Total entries attempted: $TOTAL"
 
-          # Final cleanup
-          if [ ! -s "$OUTPUT" ] || [ "$TOTAL" -eq 0 ]; then
-            echo "🛑 No valid streams found"
-            exit 1
-          fi
-
-          # Remove blank lines and malformed entries
+          # Cleanup & count real URLs
           sed -i '/^$/d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
+          FINAL=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
 
-          FINAL_COUNT=$(grep -c '^http' "$OUTPUT" 2>/dev/null || echo 0)
-          echo "📤 Final unique streams: $FINAL_COUNT"
+          echo "📤 Final working streams: $FINAL"
 
-          if [ "$FINAL_COUNT" -eq 0 ]; then
-            echo "⚠️ M3U has no valid URLs"
+          if [ "$FINAL" -eq 0 ]; then
+            echo "🛑 M3U is empty. Sample of what was generated:"
+            head -n 6 "$OUTPUT" || echo "(empty)"
             exit 1
           fi
 
       - name: Commit
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git add tamil_movies.m3u && ! git diff --staged --quiet; then
-            git commit -m "🤖 $FINAL_COUNT Tamil movies ($(date -u))"
+          git add tamil_movies.m3u
+          if ! git diff --staged --quiet; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "🤖 $FINAL Tamil movies ($(date -u))"
             git push
           else
             echo "⏭️ No changes"
