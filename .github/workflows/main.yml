@@ -1,0 +1,114 @@
+name: Fetch Tamil Movies M3U (Every 10 mins)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # Every 10 minutes
+  workflow_dispatch:         # Manual run (for testing)
+
+jobs:
+  update-m3u:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # Required to push to repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        # No token needed — uses default GITHUB_TOKEN with write (via permissions above)
+
+      - name: Set up jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch & Generate Tamil Movies M3U
+        env:
+          XTREAM_USER: "8zpo3GsVY7"
+          XTREAM_PASS: "beneficial2concern"
+          XTREAM_HOSTS: |
+            http://webhop.live
+            http://livetvbox.live
+            http://starshare.st
+            http://starshare.org
+            http://starhub.pro
+            http://starshare.cx
+        run: |
+          readarray -t HOSTS <<< "$XTREAM_HOSTS"
+          OUTPUT="tamil_movies.m3u"
+          FOUND=0
+
+          for HOST in "${HOSTS[@]}"; do
+            HOST=$(echo "$HOST" | xargs)
+            [[ -z "$HOST" ]] && continue
+
+            echo "📡 Trying host: $HOST"
+
+            # Get categories
+            CATEGORIES_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_categories"
+            CATEGORIES=$(curl -s --max-time 20 --retry 2 "$CATEGORIES_URL")
+
+            # Validate JSON
+            if ! echo "$CATEGORIES" | jq empty 2>/dev/null || [ "$(echo "$CATEGORIES" | jq 'length')" -eq 0 ]; then
+              echo "❌ Invalid/no categories from $HOST"
+              continue
+            fi
+
+            # Get VOD streams
+            VOD_URL="${HOST}/player_api.php?username=${XTREAM_USER}&password=${XTREAM_PASS}&action=get_vod_streams"
+            VOD_LIST=$(curl -s --max-time 30 --retry 2 "$VOD_URL")
+
+            if ! echo "$VOD_LIST" | jq empty 2>/dev/null || [ "$(echo "$VOD_LIST" | jq 'length')" -eq 0 ]; then
+              echo "❌ Invalid/no VOD list from $HOST"
+              continue
+            fi
+
+            # Extract Tamil category IDs (case-insensitive)
+            TAMIL_CAT_IDS=$(echo "$CATEGORIES" | jq -r '
+              .[] |
+              select(.category_name | ascii_downcase | test("tamil")) |
+              .category_id
+            ')
+
+            echo "🎬 Tamil categories found: $(echo "$TAMIL_CAT_IDS" | wc -w)"
+
+            # Build M3U
+            {
+              echo "#EXTM3U"
+              echo "# Auto-updated: $(date -u)"
+              echo "# Source: $HOST"
+              echo ""
+            } > "$OUTPUT"
+
+            # Filter & write streams
+            echo "$VOD_LIST" | jq -r --argjson cats "[$TAMIL_CAT_IDS]" '
+              .[] |
+              select(.category_id as $id | $cats | index($id)) |
+              "#EXTINF:-1 tvg-logo=\"\(.stream_icon // \"\")\" group-title=\"\(.category_name // \"Tamil\")\", \(.name)\n\(.stream_url // \"\")"
+            ' >> "$OUTPUT"
+
+            # Cleanup: remove empty/invalid lines
+            sed -i '/^$/d; /^#EXTINF.*,$/d; /^http/!d; /^#EXTINF/ {N; /http/!D;}' "$OUTPUT"
+
+            COUNT=$(grep -c '^http' "$OUTPUT")
+            echo "✅ Success! $COUNT Tamil movies fetched from $HOST"
+            FOUND=1
+            break
+          done
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "💥 All hosts failed. Aborting update."
+            exit 1
+          fi
+
+      - name: Commit and push (if changed)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$OUTPUT"
+
+          if git diff --staged --quiet; then
+            echo "⏭️ No changes — skipping commit."
+            exit 0
+          fi
+
+          git commit -m "🤖 Auto-update: Tamil Movies M3U (every 10 mins)"
+          git push
