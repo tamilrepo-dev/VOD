@@ -1,4 +1,4 @@
-name: Fetch Tamil VOD (Every 10 mins)
+http: Fetch Tamil VOD (Every 10 mins)
 
 on:
   schedule:
@@ -22,7 +22,7 @@ jobs:
         env:
           XTREAM_USER: "8zpo3GsVY7"
           XTREAM_PASS: "beneficial2concern"
-          XTREAM_HOST: "http://webhop.live"
+          XTREAM_HOST: "http://starshare.st"
         run: |
           HOST="$XTREAM_HOST"
           USER="$XTREAM_USER"
