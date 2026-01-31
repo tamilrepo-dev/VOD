@@ -20,9 +20,9 @@ jobs:
 
       - name: Build vod.m3u
         env:
-          XTREAM_USER: "8zpo3GsVY7"
-          XTREAM_PASS: "beneficial2concern"
-          XTREAM_HOST: "https://starshare.st"
+          XTREAM_USER: "Suryaaa"
+          XTREAM_PASS: "SURYAAAA"
+          XTREAM_HOST: "http://starshare.net:80"
         run: |
           HOST="$XTREAM_HOST"
           USER="$XTREAM_USER"
